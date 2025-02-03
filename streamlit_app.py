@@ -1,56 +1,113 @@
 import streamlit as st
 from openai import OpenAI
+import json
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+client = OpenAI(
+    api_key=st.secrets["GEMINI_API_KEY"],
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+def initialize_state():
+    if 'board' not in st.session_state:
+        st.session_state.board = [" "] * 9
+    if 'game_over' not in st.session_state:
+        st.session_state.game_over = False
+    if 'ai_thinking' not in st.session_state:
+        st.session_state.ai_thinking = ""
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+def check_winner(board):
+    winning_combinations = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8],  # Rows
+        [0, 3, 6], [1, 4, 7], [2, 5, 8],  # Columns
+        [0, 4, 8], [2, 4, 6]  # Diagonals
+    ]
+    for combo in winning_combinations:
+        if board[combo[0]] != " " and board[combo[0]] == board[combo[1]] == board[combo[2]]:
+            return board[combo[0]]
+    if " " not in board:
+        return "Tie"
+    return None
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
-
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
+def get_ai_move(board):
+    board_str = "|".join(board)
+    messages = [
+        {"role": "system", "content": """You are playing tic-tac-toe as O. The board is represented as a string with positions 0-8, separated by |.
+First, analyze 2-3 possible moves and explain your thinking for each. Then, make your final choice.
+Format your response as JSON with two fields:
+- "thinking": string explaining your analysis
+- "move": integer 0-8 representing your chosen move"""},
+        {"role": "user", "content": f"Current board: {board_str}\nWhat's your move?"}
+    ]
+    
+    try:
+        response = client.chat.completions.create(
+            model="gemini-1.5-flash",
+            messages=messages,
+            n=1
         )
+        content = response.choices[0].message.content
+        content = content.replace("```json", "").replace("```", "").strip()
+        response_data = json.loads(content)
+        move = int(response_data["move"])
+        st.session_state.ai_thinking = response_data["thinking"]
+        
+        if 0 <= move <= 8 and board[move] == " ":
+            return move
+    except Exception as e:
+        st.error(f"AI Error: {str(e)}")
+    
+    return board.index(" ")
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+def handle_cell_click(position):
+    if st.session_state.board[position] == " " and not st.session_state.game_over:
+        # Player move
+        st.session_state.board[position] = "X"
+        
+        winner = check_winner(st.session_state.board)
+        if winner:
+            st.session_state.game_over = True
+        else:
+            # AI move
+            ai_move = get_ai_move(st.session_state.board)
+            st.session_state.board[ai_move] = "O"
+            
+            winner = check_winner(st.session_state.board)
+            if winner:
+                st.session_state.game_over = True
+
+def handle_new_game():
+    st.session_state.board = [" "] * 9
+    st.session_state.game_over = False
+    st.session_state.ai_thinking = ""
+
+def main():
+    st.title("Tic-Tac-Toe vs AI")
+    initialize_state()
+    
+    cols = st.columns(3)
+    for i in range(9):
+        col = cols[i % 3]
+        col.button(
+            st.session_state.board[i], 
+            key=f"cell_{i}", 
+            on_click=handle_cell_click,
+            args=(i,),
+            disabled=st.session_state.game_over
+        )
+    
+    if st.session_state.ai_thinking:
+        with st.expander("AI's Analysis", expanded=True):
+            st.write(st.session_state.ai_thinking)
+    
+    winner = check_winner(st.session_state.board)
+    if winner == "X":
+        st.success("You won! 🎉")
+    elif winner == "O":
+        st.error("AI won! 🤖")
+    elif winner == "Tie":
+        st.info("It's a tie! 🤝")
+        
+    st.button("New Game", on_click=handle_new_game)
+
+if __name__ == "__main__":
+    main()
